@@ -3,4 +3,4 @@ gem 'thor'
 gem 'httparty'
 gem 'cgi'
 gem 'uri'
-
+gem 'dotenv'

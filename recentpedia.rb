@@ -5,6 +5,8 @@ require 'json'
 require 'cgi'
 require 'net/http'
 require 'uri'
+require 'dotenv'
+Dotenv.load
 
 
 # Extracts birth year from the given content using a regular expression
@@ -53,9 +55,23 @@ def classify_titles(titles, openai_api_key)
     temperature: 0.21,
     max_tokens: 1024
   )
+  begin
+    response = http.request(request)
+    response_data = JSON.parse(response.body)
 
-  response = http.request(request)
-  JSON.parse(response.body)['choices'][0]['message']['content']
+    if response_data['choices'].nil? || response_data['choices'].empty?
+      puts "Error: Received an unexpected response format from OpenAI."
+      return nil
+    else
+      return response_data['choices'][0]['message']['content']
+    end
+  rescue JSON::ParserError => e
+    puts "Error parsing JSON response: #{e.message}"
+    return nil
+  rescue => e
+    puts "An error occurred: #{e.message}"
+    return nil
+  end
 end
 
 # Fetches the description of a Wikipedia article
@@ -86,8 +102,19 @@ def fetch_new_articles
     format: 'json',
     rcstart: (Time.now.utc - (60 * 60)).strftime('%Y%m%d%H%M%S')
   }
-  response = HTTParty.get(url, query: params)
-  JSON.parse(response.body)
+  begin
+    response = HTTParty.get(url, query: params)
+    return JSON.parse(response.body)
+  rescue HTTParty::Error => e  # Catch HTTParty-specific errors
+    puts "Error fetching new articles: #{e.message}"
+    return nil
+  rescue JSON::ParserError => e  # Catch JSON parsing errors
+    puts "Error parsing JSON response: #{e.message}"
+    return nil
+  rescue StandardError => e  # Catch other errors, such as network issues
+    puts "An unexpected error occurred: #{e.message}"
+    return nil
+  end
 end
 
 # Constructs URLs for Wikipedia articles and their diffs
@@ -100,21 +127,35 @@ def construct_links(change)
   }
 end
 
-
 if __FILE__ == $0
-  if ARGV.empty?
-    puts "Usage: #{$0} <openai_api_key>"
+  openai_api_key = ENV['OPENAI_API_KEY']
+  if openai_api_key.nil? || openai_api_key.strip.empty?
+    puts "Error: OPENAI_API_KEY environment variable is not set."
+    puts "Please set the environment variable in the .env file and try again."
     exit 1
   end
 
-  openai_api_key = ARGV[0]
-
+  # Loading state for fetching new articles
+  puts "Fetching recently changed articles from Wikipedia..."
   new_articles = fetch_new_articles['query']['recentchanges']
+  
+  if new_articles.nil?
+    puts "Failed to fetch new articles. Exiting."
+    exit 1
+  end
+  
+  puts "#{new_articles.length} articles fetched."
+
+  # Process and display articles
   new_articles.each { |article| article.merge!(construct_links(article)) }
   significant_articles = new_articles.select { |change| (change['newlen'] - change['oldlen']).abs > 3684 }
   titles = significant_articles.map { |article| article['title'] }
+
+  # Loading state for classifying titles
+  puts "Classifying article titles using OpenAI..."
   response = classify_titles(titles, openai_api_key)
 
+  # Display the classified titles
   people_titles, sports_titles, other_titles = parse_response(response)
   filtered_articles = significant_articles.select do |article|
     title = article['title']
@@ -129,9 +170,14 @@ if __FILE__ == $0
     end
   end
   puts "Articles:"
-  filtered_articles.each_with_index do |article, index|
-    puts "#{index + 1}. #{article['title']} - #{article[:article_url]}"
+  if filtered_articles.empty?
+    puts "No articles available."
+  else
+    filtered_articles.each_with_index do |article, index|
+      puts "#{index + 1}. #{article['title']} - #{article[:article_url]}"
+    end
   end
+  
 
   puts "\n"
 end
